@@ -8,6 +8,8 @@ Endpoints:
     POST /parse/ast       file -> Abstract Syntax Tree (semantic nodes)
     POST /parse/both      file -> {cst, ast, stats}
     POST /render          file -> ASCII tree rendering of cst/ast
+    POST /obsidian        file -> Obsidian vault (interlinked notes + Mermaid)
+    POST /obsidian/zip    file -> downloadable .zip Obsidian vault
 
 Supported: COBOL (dedicated parser), Python (ast + tokenize),
 everything else falls back to a generic line/token parser.
@@ -15,10 +17,14 @@ everything else falls back to a generic line/token parser.
 
 from __future__ import annotations
 
+import io
 import sys
+import zipfile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
+from . import obsidian
 from .parsers import cobol_parser, generic_parser, python_parser
 
 # Deeply nested / very large files (50k-60k lines) can exceed Python's default
@@ -44,7 +50,8 @@ EXT_LANG = {
 @app.get("/")
 def info():
     return {"service": "cst-ast-parser", "port": 8002, "docs": "/docs",
-            "engines": ["cobol", "python", "generic"]}
+            "engines": ["cobol", "python", "generic"],
+            "exports": ["obsidian-vault", "obsidian-zip"]}
 
 
 @app.get("/health")
@@ -186,3 +193,46 @@ async def render(file: UploadFile = File(...), language: str = Form("auto"),
     text = "\n".join(_render(root))
     return {"filename": file.filename, "language": language, "tree": tree,
             "rendering": text}
+
+
+@app.post("/obsidian")
+async def obsidian_export(file: UploadFile = File(...), language: str = Form("auto"),
+                          tree: str = Form("ast"), max_nodes: int = Form(1500)):
+    """Return an Obsidian vault (map of path -> markdown) for the tree.
+
+    Includes a native Mermaid graph in `00-index.md` plus one interlinked
+    note per node under `nodes/` for Obsidian's Graph view.
+    """
+    source, language = await _read_upload(file, language)
+    file_label = file.filename or "source"
+    cst, ast_tree, error = _dispatch(source, language)
+    root = ast_tree if tree == "ast" else cst
+    if root is None:
+        raise HTTPException(422, {"detail": "Tree unavailable", "error": error})
+    vault = obsidian.build_vault(root, file_label, tree_kind=tree,
+                                 max_nodes=max_nodes)
+    return {"filename": file.filename, "language": language, "tree": tree,
+            "node_count": vault["node_count"], "truncated": vault["truncated"],
+            "mermaid": vault["mermaid"], "files": vault["files"]}
+
+
+@app.post("/obsidian/zip")
+async def obsidian_zip(file: UploadFile = File(...), language: str = Form("auto"),
+                       tree: str = Form("ast"), max_nodes: int = Form(5000)):
+    """Return a downloadable .zip Obsidian vault (unzip and open in Obsidian)."""
+    source, language = await _read_upload(file, language)
+    file_label = file.filename or "source"
+    cst, ast_tree, error = _dispatch(source, language)
+    root = ast_tree if tree == "ast" else cst
+    if root is None:
+        raise HTTPException(422, {"detail": "Tree unavailable", "error": error})
+    vault = obsidian.build_vault(root, file_label, tree_kind=tree,
+                                 max_nodes=max_nodes)
+    base = (file.filename or "vault").rsplit(".", 1)[0]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in vault["files"].items():
+            zf.writestr(f"{base}/{path}", content)
+    buf.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{base}-obsidian.zip"'}
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)

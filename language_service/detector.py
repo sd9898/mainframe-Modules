@@ -17,6 +17,19 @@ EXTENSION_MAP = {
     ".rb": "ruby", ".go": "go", ".rs": "rust",
     ".html": "html", ".css": "css", ".json": "json", ".xml": "xml",
     ".sql": "sql", ".sh": "shell", ".bat": "batch", ".ps1": "powershell",
+    # mainframe / z/OS artefacts
+    ".jcl": "jcl", ".bms": "bms", ".asm": "assembler", ".mac": "assembler",
+    ".ddl": "sql", ".prc": "cobol", ".dcl": "sql", ".ctl": "sort",
+    ".dbd": "cobol", ".psb": "cobol", ".csd": "cobol", ".scb": "cobol",
+    # other languages
+    ".bas": "basic", ".bi": "basic", ".pl": "perl", ".pm": "perl",
+    ".lua": "lua", ".php": "php",
+}
+
+# Extensions we treat as authoritative: the extension wins over weak content
+# signals (many mainframe artefacts otherwise look like Ruby/C due to END/def).
+AUTHORITATIVE_EXT = {
+    "jcl", "bms", "assembler", "sort", "basic", "cobol",
 }
 
 # (regex, weight) signals per language
@@ -76,6 +89,56 @@ CONTENT_SIGNALS = {
     "go": [(r"\bfunc\s+\w*\(", 6), (r"\bpackage\s+main\b", 6), (r"\bfmt\.Print", 5)],
     "sql": [(r"\bSELECT\b.+?\bFROM\b", 6), (r"\bCREATE\s+TABLE\b", 6), (r"\bINSERT\s+INTO\b", 5)],
     "shell": [(r"^#!.*sh", 8), (r"\becho\s+[\"$]", 3)],
+    "jcl": [
+        (r"^ //{1,2}\w*\s+(JOB|EXEC|DD)", 8),
+        (r"\bEXEC\s+PGM\s*=", 8),
+        (r"\bDD\s+(SYSOUT|DSN|DUMMY)", 6),
+        (r"\bSPACE\s*=(TRacks|CYL)", 5),
+        (r"\bREGION\s*=", 3),
+    ],
+    "assembler": [
+        (r"^\S{1,8}\s+(CSECT|START|END)\b", 7),
+        (r"\b(USING|SAVEAREA|BALR|STM|LM)\b", 4),
+        (r"\bSVC\s+\d", 5),
+        (r"^\s{1,10}\w{1,6}\s+(DS|DC)\s+[BXRPCD]\b", 6),
+    ],
+    "bms": [
+        (r"\bDFHMSD\b", 10),
+        (r"\bDFHMDI\b", 8),
+        (r"\bDFHMDF\b", 8),
+    ],
+    "sort": [
+        (r"\bSORT\s+FIELDS\b", 8),
+        (r"\bINCLUDE\s+FIELDS\b", 8),
+        (r"\bINSTREAM\b", 4),
+    ],
+    "basic": [
+        (r"^\s*\d+\s+", 3),               # line-numbered BASIC
+        (r"\b(GOSUB|GO\s+SUB)\b", 6),
+        (r"\bLET\s+\w+\s*=", 5),
+        (r"\bPRINT\s+#", 5),
+        (r"\bINPUT\s+#", 4),
+        (r"\bDIM\s+\w+\s*\(", 4),
+        (r"\bEND\s*[- ]?IF\b", 3),
+        (r"^\s*(REM|\$INCLUDE)\b", 3),
+        (r"\bSUB-PROGRAM\b", 6),
+    ],
+    "perl": [
+        (r"^#!.*perl", 8),
+        (r"\buse\s+strict\b", 6),
+        (r"\bmy\s+\$\w+", 6),
+        (r"\bprint\s+\"", 3),
+    ],
+    "lua": [
+        (r"\blocal\s+\w+\s*=", 5),
+        (r"\bfunction\s+\w+\s*\(", 4),
+        (r"\bthen\b.*\bbegin\b", 3),
+        (r"\bend\s*$", 2),
+    ],
+    "php": [
+        (r"<\?php", 10),
+        (r"\$\w+\s*=", 3),
+    ],
 }
 
 
@@ -100,10 +163,16 @@ def detect(filename: str | None, content: str) -> dict:
     content_lang = max(scores, key=scores.get) if scores else None
     max_score = scores.get(content_lang, 0)
 
+    # A single weak signal (e.g. a line ending in "end") should not mislabel a
+    # file as Ruby/C; require some evidence before trusting a content guess.
+    MIN_CONTENT_SCORE = 5
+    if content_lang and max_score < MIN_CONTENT_SCORE:
+        content_lang = None
+
     # combine extension + content
-    if content_lang and ext_lang and content_lang == ext_lang:
+    if ext_lang and content_lang and content_lang == ext_lang:
         language, method, confidence = content_lang, "extension+content", min(1.0, 0.7 + max_score / 40)
-    elif ext_lang and (not content_lang or max_score < 8):
+    elif ext_lang and (not content_lang or ext_lang in AUTHORITATIVE_EXT or max_score < 8):
         language, method, confidence = ext_lang, "extension", 0.6
     elif content_lang:
         language, method, confidence = content_lang, "content", min(1.0, 0.35 + max_score / 40)

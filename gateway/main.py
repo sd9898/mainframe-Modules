@@ -10,16 +10,20 @@ Endpoints:
     POST /parse/ast           -> parse-service
     POST /parse/both          -> parse-service
     POST /render              -> parse-service (tree=ast|cst)
+    POST /obsidian            -> parse-service (Obsidian vault JSON)
+    POST /obsidian/zip        -> parse-service (downloadable .zip vault)
 
 Each upstream URL can be overridden with env vars:
     LANGUAGE_SERVICE_URL (default http://127.0.0.1:8001)
     PARSE_SERVICE_URL    (default http://127.0.0.1:8002)
 """
 
+import io
 import os
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 LANGUAGE_SERVICE_URL = os.getenv("LANGUAGE_SERVICE_URL", "http://127.0.0.1:8001")
 PARSE_SERVICE_URL = os.getenv("PARSE_SERVICE_URL", "http://127.0.0.1:8002")
@@ -60,6 +64,8 @@ def info():
             "POST /parse/ast": "upload a file -> Abstract Syntax Tree",
             "POST /parse/both": "upload a file -> CST + AST + stats",
             "POST /render": "upload a file -> ASCII tree (form field tree=ast|cst)",
+            "POST /obsidian": "upload a file -> Obsidian vault JSON (notes + Mermaid)",
+            "POST /obsidian/zip": "upload a file -> downloadable .zip Obsidian vault",
             "GET /health": "aggregate health",
         },
     }
@@ -186,3 +192,38 @@ async def proxy_render(request: Request, file: UploadFile = File(...),
                           files={"file": (file.filename, await file.read(),
                                          "application/octet-stream")},
                           data={"language": language, "tree": tree})
+
+
+@app.post("/obsidian")
+async def proxy_obsidian(request: Request, file: UploadFile = File(...),
+                         language: str = Form("auto"), tree: str = Form("ast"),
+                         max_nodes: int = Form(1500)):
+    return await _forward(PARSE_SERVICE_URL + "/obsidian", request,
+                          files={"file": (file.filename, await file.read(),
+                                         "application/octet-stream")},
+                          data={"language": language, "tree": tree,
+                                "max_nodes": max_nodes})
+
+
+@app.post("/obsidian/zip")
+async def proxy_obsidian_zip(request: Request, file: UploadFile = File(...),
+                             language: str = Form("auto"), tree: str = Form("ast"),
+                             max_nodes: int = Form(5000)):
+    """Proxy the binary .zip vault straight through to the client."""
+    url = PARSE_SERVICE_URL + "/obsidian/zip"
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            resp = await client.post(
+                url,
+                files={"file": (file.filename, await file.read(),
+                                 "application/octet-stream")},
+                data={"language": language, "tree": tree, "max_nodes": max_nodes},
+            )
+    except httpx.ConnectError:
+        raise HTTPException(503, f"Upstream service unavailable: {url}")
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, resp.text)
+    fname = (file.filename or "vault").rsplit(".", 1)[0] + "-obsidian.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    return StreamingResponse(io.BytesIO(resp.content), media_type="application/zip",
+                             headers=headers)

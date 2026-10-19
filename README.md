@@ -18,6 +18,7 @@ It is built as small, independent **FastAPI microservices** so nothing gets comp
    | GET  /health        |          | POST /parse/ast     |
    +---------------------+          | POST /parse/both    |
                                     | POST /render        |
+                                    | POST /obsidian      |
                                     +---------------------+
 ```
 
@@ -25,7 +26,7 @@ It is built as small, independent **FastAPI microservices** so nothing gets comp
 |---|---|---|
 | **gateway** | 8000 | Single entry point, orchestrates the pipeline, proxies individual APIs |
 | **language-service** | 8001 | Detects the file's language (extension + content heuristics) |
-| **parse-service** | 8002 | Builds CST + AST for **any language** (dedicated COBOL & Python engines + a language-agnostic generic engine) |
+| **parse-service** | 8002 | Builds CST + AST for **any language** (dedicated COBOL & Python engines + a language-agnostic generic engine) and exports an **Obsidian** graph vault |
 
 Each service has its own interactive docs: `http://127.0.0.1:8000/docs` (and `:8001/docs`, `:8002/docs`).
 
@@ -75,6 +76,7 @@ Query flags on `/analyze`: `?include_cst=false` or `?include_ast=false` to reque
 | POST | `/analyze` | file → detection **+** CST **+** AST (multipart `file`) |
 | POST | `/detect-language` | proxied to language-service |
 | POST | `/parse/cst`, `/parse/ast`, `/parse/both`, `/render` | proxied to parse-service (`language` form field: `auto` or explicit) |
+| POST | `/obsidian`, `/obsidian/zip` | proxied to parse-service — Obsidian vault (JSON / downloadable zip) |
 
 ### Language service (`:8001`)
 | Method | Path | Description |
@@ -82,7 +84,10 @@ Query flags on `/analyze`: `?include_cst=false` or `?include_ast=false` to reque
 | POST | `/detect-language` | multipart `file` **or** JSON `{"filename?", "content"}` → `{language, confidence, method, signals}` |
 | GET | `/health` | liveness |
 
-Detects: cobol, python, javascript, typescript, c, cpp, java, ruby, go, sql, shell, …
+Detects: cobol, python, javascript, typescript, c, cpp, java, ruby, go, sql, shell,
+plus mainframe artefacts — **jcl, bms (CICS maps), assembler, sort (DFSORT/JCL)**,
+SQL DDL, and **BASIC, Perl, Lua, PHP**. A confidence floor prevents a single stray
+keyword from misclassifying a file, and mainframe/known extensions are authoritative.
 
 ### Parse service (`:8002`)
 | Method | Path | Description |
@@ -91,8 +96,11 @@ Detects: cobol, python, javascript, typescript, c, cpp, java, ruby, go, sql, she
 | POST | `/parse/ast` | file → Abstract Syntax Tree (semantic nodes only) |
 | POST | `/parse/both` | file → `{cst, ast, stats, parse_error}` |
 | POST | `/render` | file → ASCII tree (`tree=ast` or `tree=cst`) |
+| POST | `/obsidian` | file → **Obsidian vault** JSON: `{files, mermaid, node_count}` |
+| POST | `/obsidian/zip` | file → downloadable `.zip` Obsidian vault (open as a vault) |
 
-Form fields: `file` (required), `language` (`auto`/`cobol`/`python`/anything→generic).
+Form fields: `file` (required), `language` (`auto`/`cobol`/`python`/anything→generic),
+and for `/obsidian*`: `tree` (`ast`/`cst`), `max_nodes` (cap for huge trees).
 
 ## Parsing engines
 
@@ -115,11 +123,38 @@ Form fields: `file` (required), `language` (`auto`/`cobol`/`python`/anything→g
   (function/class/conditional/loop/import/…). Pass `language=auto` or an
   explicit name; unknown names safely fall back to the generic engine.
 
+## Obsidian visualization
+
+Every tree can be exported as an **[Obsidian](https://obsidian.md) vault** so the
+syntax tree becomes a navigable, visual **graph of nodes**:
+
+- `00-index.md` — program overview, node count and a native **Mermaid** diagram
+  (Obsidian renders Mermaid out of the box — an instant tree picture).
+- `nodes/<id>-<label>.md` — one note per tree node, linked to its parent and
+  children with `[[wikilinks]]`. Open the vault's **Graph view** to explore the
+  whole CST/AST as connected nodes.
+
+```powershell
+# get the vault as JSON (map of path -> markdown)
+curl.exe -X POST http://127.0.0.1:8000/obsidian -F file=@samples/HelloWorld.cbl -F tree=ast
+
+# download a ready-to-open .zip vault
+curl.exe -X POST http://127.0.0.1:8000/obsidian/zip -F file=@samples/HelloWorld.cbl -o vault.zip
+```
+
+`max_nodes` bounds the export for very large files (the index notes when a tree
+was truncated). To build a combined multi-language vault from a whole repo, run
+`python tests/try_carddemo.py --vault` (writes `obsidian_vault/carddemo/`).
+
 ## Tests
 
 ```bat
 python tests\try_cobol.py    :: offline parser unit checks (no servers needed)
 python tests\try_api.py      :: end-to-end API tests (services must be running)
+python tests\try_big_file.py :: 60,000-line scale test
+python tests\try_carddemo.py --vault :: sweep a real multi-language mainframe repo
+python tests\try_repo.py <dir> --vault :: generic sweep of ANY cloned repo (used to
+                                          :: validate ACAS, GNUCobol-Samples, …)
 ```
 
 ## Project layout
@@ -129,8 +164,10 @@ gateway/                API gateway (:8000)
 language_service/       language detection microservice (:8001)
 parse_service/          CST/AST parse microservice (:8002)
   parsers/              cobol_parser.py, python_parser.py, generic_parser.py
+  obsidian.py           AST/CST -> Obsidian vault (interlinked notes + Mermaid)
 samples/                HelloWorld.cbl, demo.py, app.js
-tests/                  try_cobol.py (unit), try_api.py (e2e), try_big_file.py (60k lines)
+tests/                  try_cobol.py (unit), try_api.py (e2e), try_big_file.py (60k lines),
+                        try_carddemo.py (real-repo sweep + Obsidian vault)
 start_all.bat / .sh     one-command local launch
 ```
 

@@ -18,3 +18,8 @@ Thumbs.db
 
 # Local scratch
 *.log
+
+# Test fixtures / generated output (not part of the service)
+# any leading-underscore dir is a throwaway clone of an external repo
+_*/
+obsidian_vault/
